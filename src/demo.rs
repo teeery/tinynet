@@ -2,6 +2,7 @@ use std::rc::Rc;
 
 use crate::address::{Ipv4Addr, MacAddr};
 use crate::host::Host;
+use crate::ospf::{Link, Topology};
 use crate::packet::IpPacket;
 use crate::routing::{ForwardOutcome, Interface, Router, RoutingTable};
 use crate::switch::Switch;
@@ -254,4 +255,38 @@ pub fn demo_v05() {
             }
         }
     }
+}
+
+// ========== 简化版 OSPF:动态路由(SPF 最短路径优先) ==========
+pub fn demo_v06() {
+    println!("========== 简化版 OSPF:动态路由(SPF 最短路径优先) ==========");
+
+    // 初始拓扑(无向,数字是链路开销):
+    //          R1
+    //         /  \
+    //       2/    \6
+    //       /      \
+    //      R2 --2-- R3
+    //       \      /
+    //       2\    /1
+    //         \  /
+    //          R4
+    let mut topo = Topology::new(vec![
+        Link { from: "R1", to: "R2", cost: 2 },
+        Link { from: "R1", to: "R3", cost: 6 },
+        Link { from: "R2", to: "R3", cost: 2 },
+        Link { from: "R2", to: "R4", cost: 2 },
+        Link { from: "R3", to: "R4", cost: 1 },
+    ]);
+
+    println!("--- 初始:R1 跑一次 SPF ---");
+    topo.print_spf("R1");
+    println!();
+
+    println!("--- 模拟 R2-R4 链路 DOWN,重新计算 ---");
+    topo.bring_link_down("R2", "R4");
+    topo.print_spf("R1");
+    println!();
+
+    println!("说明:R4 的开销从 4 变 5,R1 自动绕道 R2-R3-R4,无需人工改配置。");
 }
