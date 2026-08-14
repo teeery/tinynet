@@ -98,8 +98,12 @@ impl Host {
     fn send_to(&self, dst_ip: Ipv4Addr, data: &str, switch: &mut Switch) {
         println!("[{}] 准备发送数据到 {}", self.name, dst_ip.to_dotted());
 
-        // 缓存未命中 → 广播 ARP 请求
-        let cached = self.arp_cache.borrow().get(&dst_ip).copied();
+        // 路由决策:确定下一跳(同子网 → 目的 IP,跨子网 → 网关)
+        // IP 决定最终目的地;路由决定下一跳;ARP 只负责解析下一跳。
+        let next_hop_ip = self.next_hop(dst_ip);
+
+        // 缓存未命中 → 广播 ARP 请求(解析的是下一跳,不是目的地址)
+        let cached = self.arp_cache.borrow().get(&next_hop_ip).copied();
         if cached.is_none() {
             println!("[{}] ARP 缓存未命中,广播 ARP 请求", self.name);
             let req = EthernetFrame {
@@ -109,7 +113,7 @@ impl Host {
                     request: true,
                     sender_ip: self.ip,
                     sender_mac: self.mac,
-                    target_ip: dst_ip,
+                    target_ip: next_hop_ip,
                     target_mac: None,
                 }),
             };
@@ -118,7 +122,7 @@ impl Host {
         }
 
         // 重新读缓存(ARP 完成后应该有了)
-        let dst_mac = self.arp_cache.borrow().get(&dst_ip).copied();
+        let dst_mac = self.arp_cache.borrow().get(&next_hop_ip).copied();
         match dst_mac {
             Some(mac) => {
                 let frame = EthernetFrame {
@@ -129,7 +133,7 @@ impl Host {
                 switch.forward(frame);
             }
             None => {
-                println!("[{}] 无法解析 {} 的 MAC,发送失败", self.name, dst_ip.to_dotted());
+                println!("[{}] 无法解析 {} 的 MAC,发送失败", self.name, next_hop_ip.to_dotted());
             }
         }
     }
@@ -180,17 +184,28 @@ impl Host {
         }
     }
 
-    // v0.1 遗留:L3 路由决策演示(同一子网直接交付 / 不同子网走网关)
+    // 路由决策:根据目的 IP 是否同子网,返回下一跳 IP(纯计算,不打印)
+    // 同子网 → 直接交付(下一跳 = 目的 IP);跨子网 → 间接交付(下一跳 = 网关)
     fn next_hop(&self, dst_ip: Ipv4Addr) -> Ipv4Addr {
+        if same_subnet(self.ip, dst_ip, self.netmask) {
+            dst_ip
+        } else {
+            self.gateway
+        }
+    }
+
+    // v0.1 遗留:L3 路由决策演示(打印决策过程,供教学观察)
+    fn explain_route(&self, dst_ip: Ipv4Addr) -> Ipv4Addr {
         let src_net = network_address(self.ip, self.netmask);
         let dst_net = network_address(dst_ip, self.netmask);
         let prefix = self.netmask.prefix_len();
 
         let same = same_subnet(self.ip, dst_ip, self.netmask);
-        let (decision, delivery, next_ip) = if same {
-            ("同一子网", "直接交付", dst_ip)
+        let next_ip = self.next_hop(dst_ip);
+        let (decision, delivery) = if same {
+            ("同一子网", "直接交付")
         } else {
-            ("不同子网", "间接交付", self.gateway)
+            ("不同子网", "间接交付")
         };
 
         println!(
@@ -301,11 +316,11 @@ fn main() {
     );
 
     println!("========== 场景一：同一子网 ==========");
-    alice.next_hop(Ipv4Addr { value: 0xC0A80A32 }); // 192.168.10.50
+    alice.explain_route(Ipv4Addr { value: 0xC0A80A32 }); // 192.168.10.50
     println!();
 
     println!("========== 场景二：不同子网 ==========");
-    alice.next_hop(Ipv4Addr { value: 0xC0A80A46 }); // 192.168.10.70
+    alice.explain_route(Ipv4Addr { value: 0xC0A80A46 }); // 192.168.10.70
     println!();
 
     // ========== v0.2:二层交换(ARP + MAC 学习 + 广播) ==========
