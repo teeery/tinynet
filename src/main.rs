@@ -4,6 +4,7 @@ mod host;
 mod switch;
 mod routing;
 mod ospf;
+mod bgp;
 mod demo;
 
 fn main() {
@@ -13,4 +14,5 @@ fn main() {
     demo::demo_v04();
     demo::demo_v05();
     demo::demo_v06();
+    demo::demo_v07();
 }

@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::address::{Ipv4Addr, MacAddr};
+use crate::bgp::{select_bgp_route, BgpPolicy, BgpRoute, Prefix};
 use crate::host::Host;
 use crate::ospf::{Link, Topology};
 use crate::packet::IpPacket;
@@ -289,4 +290,95 @@ pub fn demo_v06() {
     println!();
 
     println!("说明:R4 的开销从 4 变 5,R1 自动绕道 R2-R3-R4,无需人工改配置。");
+}
+
+// ========== v0.7:简化版 BGP(路径向量 + 策略选路) ==========
+pub fn demo_v07() {
+    println!("========== v0.7:简化版 BGP(路径向量 + 策略选路) ==========");
+    println!();
+
+    // 目的前缀:20.0.0.0/8,由 AS3 始发
+    let prefix = Prefix::new(Ipv4Addr { value: 20 << 24 }, 8);
+
+    println!("背景:AS1 要去 20.0.0.0/8(由 AS3 始发)。两个邻居都来广播这条前缀:");
+    println!("       AS2 说:走我 → 路径 [AS2, AS3]");
+    println!("       AS4 说:走我 → 路径 [AS4, AS3]");
+    println!("       AS_PATH 一样长,该听谁的?这就是策略(local_pref)的用武之地。");
+    println!();
+
+    println!("--- 场景一:没有策略,两条 AS_PATH 一样长 → 兜底比较 ---");
+    let r1 = BgpRoute::new(prefix, vec![2, 3]);
+    let r2 = BgpRoute::new(prefix, vec![4, 3]);
+    println!("  候选 1: {}", r1.to_string());
+    println!("  候选 2: {}", r2.to_string());
+    println!("  local_pref 平局 → AS_PATH 一样长 → 按 AS_PATH 字典序兜底");
+    let routes = [r1, r2];
+    let best = select_bgp_route(&routes);
+    println!("→ 选中: {}", best.to_string());
+    println!();
+
+    println!("--- 场景二:AS1 配置策略「偏好 AS4」→ 策略优先于一切 ---");
+    let mut r1 = BgpRoute::new(prefix, vec![2, 3]);
+    let mut r2 = BgpRoute::new(prefix, vec![4, 3]);
+
+    let mut as1_policy = BgpPolicy::new(1);
+    as1_policy.prefer(4, 200); // 来自 AS4 的路由,local_pref 提到 200
+    as1_policy.apply(&mut r1);
+    as1_policy.apply(&mut r2);
+
+    println!("  AS{} 的策略:偏好 AS4 → 来自它的路由 local_pref = 200", as1_policy.asn);
+    println!("  应用策略后:");
+    println!("  候选 1: {}", r1.to_string());
+    println!("  候选 2: {}", r2.to_string());
+    println!("  AS_PATH 还是一样长,但 local_pref 200 > 100");
+    let routes = [r1, r2];
+    let best = select_bgp_route(&routes);
+    println!("→ 选中: {}  ← 策略胜出", best.to_string());
+    println!();
+
+    println!("--- 场景三:local_pref 相同,AS_PATH 越短越优先 ---");
+    let r1 = BgpRoute::new(prefix, vec![2, 3]);     // 2 跳
+    let r2 = BgpRoute::new(prefix, vec![4, 5, 3]);  // 3 跳
+    println!("  候选 1: {}   ({} 跳)", r1.to_string(), r1.as_path.len());
+    println!("  候选 2: {}   ({} 跳)", r2.to_string(), r2.as_path.len());
+    let routes = [r1, r2];
+    let best = select_bgp_route(&routes);
+    println!("→ 选中: {}  ← 短路径胜出", best.to_string());
+    println!();
+
+    println!("--- 场景四:同一张物理图,OSPF(Dijkstra)和 BGP 的答案不一样 ---");
+    println!("  物理拓扑(数字 = 链路开销):");
+    println!("    AS1 --1-- AS2 --1-- AS3   ← 到 AS3 物理上近(总开销 2)");
+    println!("      \\             /");
+    println!("       \\--10--AS4--/          ← 到 AS3 物理上远(总开销 20)");
+    println!();
+    let topo = Topology::new(vec![
+        Link { from: "AS1", to: "AS2", cost: 1 },
+        Link { from: "AS2", to: "AS3", cost: 1 },
+        Link { from: "AS1", to: "AS4", cost: 10 },
+        Link { from: "AS4", to: "AS3", cost: 10 },
+    ]);
+    println!("  [OSPF/SPF 视角] 按链路开销算到 AS3(20.0.0.0/8 的始发 AS)的最短路径:");
+    topo.print_spf("AS1");
+    println!("  → Dijkstra 选:走 AS2(开销 2)");
+    println!();
+
+    println!("  [BGP 视角] 同样的目的地,但 AS1 的策略是「偏好 AS4」:");
+    let mut r1 = BgpRoute::new(prefix, vec![2, 3]);
+    let mut r2 = BgpRoute::new(prefix, vec![4, 3]);
+    let mut as1_policy = BgpPolicy::new(1);
+    as1_policy.prefer(4, 200);
+    as1_policy.apply(&mut r1);
+    as1_policy.apply(&mut r2);
+    println!("  候选 1: {}", r1.to_string());
+    println!("  候选 2: {}", r2.to_string());
+    let routes = [r1, r2];
+    let best = select_bgp_route(&routes);
+    println!("→ BGP 选:{}  ← 即使物理上绕远,策略说了算", best.to_string());
+    println!();
+
+    println!("结论:OSPF(IGP)在 AS 内部用 Dijkstra 比链路开销;");
+    println!("     BGP(EGP)在 AS 之间用策略 + AS_PATH 比路径。");
+    println!("     跨 AS 你管不着别人的内部开销,只能靠策略约定「我信谁、我偏爱谁」。");
+    println!("     所以:路由选择不再只是 Dijkstra。");
 }
