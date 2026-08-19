@@ -7,6 +7,7 @@ use crate::ospf::{Link, Topology};
 use crate::packet::IpPacket;
 use crate::routing::{ForwardOutcome, Interface, Router, RoutingTable};
 use crate::switch::Switch;
+use crate::reliable::{GbnReceiver, GbnSender, LossyNetwork, SrReceiver, SrSender};
 
 // ========== v0.1:L3 路由决策演示 ==========
 pub fn demo_v01() {
@@ -256,6 +257,119 @@ pub fn demo_v05() {
             }
         }
     }
+}
+
+// ========== v0.4：可靠传输（GBN 与 SR 对照实验） ==========
+pub fn demo_v04_reliable_transport() {
+    const WINDOW_SIZE: u32 = 4;
+    const TIMEOUT: u32 = 3;
+
+    println!("========== v0.4：可靠传输（故意丢弃 seq=2） ==========");
+    println!("核心机制：Seq + ACK + Timeout + Retransmission");
+    println!();
+
+    // 本次对照实验需要固定结果，所以使用 drop_once。若要观察随机丢包，可把网络
+    // 替换成 LossyNetwork::random(丢包百分比, 随机种子)；相同种子可复现实验。
+    let _random_loss_example = LossyNetwork::random(20, 0x5449_4e59);
+
+    // 两次实验使用各自独立的网络，都会只丢弃 seq=2 的第一次发送。
+    println!("--- GBN：乱序报文直接丢弃，超时后回退重传整个窗口 ---");
+    let mut gbn_sender = GbnSender::new(WINDOW_SIZE, TIMEOUT);
+    let mut gbn_receiver = GbnReceiver::new();
+    let mut gbn_network = LossyNetwork::drop_once([2]);
+
+    for seq in 1..=4 {
+        let segment = gbn_sender.send(format!("message-{seq}")).unwrap();
+        print!("send {}", segment.seq);
+        match gbn_network.transmit(segment) {
+            None => println!("  X（网络丢包）"),
+            Some(segment) => {
+                println!();
+                let received_seq = segment.seq;
+                let result = gbn_receiver.receive(segment);
+                if result.delivered.is_empty() {
+                    println!("recv {} -> drop（期望 seq={}）", received_seq, gbn_receiver.expected_seq);
+                } else {
+                    println!("recv {} -> deliver, ACK {}", received_seq, result.ack.unwrap());
+                }
+                gbn_sender.receive_ack(result.ack.unwrap());
+            }
+        }
+    }
+
+    let gbn_retransmissions = wait_for_gbn_timeout(&mut gbn_sender);
+    println!("timeout {}", gbn_sender.send_base);
+    println!("retransmit: {}", seq_list(&gbn_retransmissions));
+    for segment in gbn_retransmissions {
+        let result = gbn_receiver.receive(segment);
+        gbn_sender.receive_ack(result.ack.unwrap());
+    }
+    println!("GBN 完成：send_base={}，未确认队列={}", gbn_sender.send_base, gbn_sender.unacked_queue.len());
+    println!();
+
+    println!("--- SR：乱序报文进入缓存，超时后只重传丢失报文 ---");
+    let mut sr_sender = SrSender::new(WINDOW_SIZE, TIMEOUT);
+    let mut sr_receiver = SrReceiver::new(WINDOW_SIZE);
+    let mut sr_network = LossyNetwork::drop_once([2]);
+
+    for seq in 1..=4 {
+        let segment = sr_sender.send(format!("message-{seq}")).unwrap();
+        print!("send {}", segment.seq);
+        match sr_network.transmit(segment) {
+            None => println!("  X（网络丢包）"),
+            Some(segment) => {
+                println!();
+                let received_seq = segment.seq;
+                let result = sr_receiver.receive(segment);
+                if result.buffered {
+                    println!("recv {} -> buffer, ACK {}", received_seq, result.ack.unwrap());
+                } else {
+                    println!("recv {} -> deliver, ACK {}", received_seq, result.ack.unwrap());
+                }
+                sr_sender.receive_ack(result.ack.unwrap());
+            }
+        }
+    }
+
+    let sr_retransmissions = wait_for_sr_timeout(&mut sr_sender);
+    println!("timeout {}", sr_sender.send_base);
+    println!("retransmit: {} only", seq_list(&sr_retransmissions));
+    let mut delivered = Vec::new();
+    for segment in sr_retransmissions {
+        let result = sr_receiver.receive(segment);
+        if let Some(ack) = result.ack {
+            sr_sender.receive_ack(ack);
+        }
+        delivered.extend(result.delivered.into_iter().map(|segment| segment.seq));
+    }
+    println!("deliver: {}", delivered.iter().map(u32::to_string).collect::<Vec<_>>().join(" "));
+    println!("SR 完成：send_base={}，buffer={}，未确认队列={}",
+        sr_sender.send_base, sr_receiver.buffer.len(), sr_sender.unacked_queue.len());
+    println!();
+
+    println!("结论：GBN 接收端简单但会重复发送 3、4；SR 用缓存换来更少的重传。\n");
+}
+
+fn wait_for_gbn_timeout(sender: &mut GbnSender) -> Vec<crate::reliable::Segment> {
+    loop {
+        let retransmissions = sender.tick();
+        if !retransmissions.is_empty() {
+            return retransmissions;
+        }
+    }
+}
+
+fn wait_for_sr_timeout(sender: &mut SrSender) -> Vec<crate::reliable::Segment> {
+    loop {
+        let retransmissions = sender.tick();
+        if !retransmissions.is_empty() {
+            return retransmissions;
+        }
+    }
+}
+
+fn seq_list(segments: &[crate::reliable::Segment]) -> String {
+    segments.iter().map(|segment| segment.seq.to_string()).collect::<Vec<_>>().join(" ")
 }
 
 // ========== 简化版 OSPF:动态路由(SPF 最短路径优先) ==========

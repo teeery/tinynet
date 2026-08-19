@@ -6,6 +6,7 @@ mod routing;
 mod ospf;
 mod bgp;
 mod demo;
+mod reliable;
 
 fn main() {
     demo::demo_v01();
@@ -13,6 +14,7 @@ fn main() {
     demo::demo_v03();
     demo::demo_v04();
     demo::demo_v05();
+    demo::demo_v04_reliable_transport();
     demo::demo_v06();
     demo::demo_v07();
 }
