@@ -4,11 +4,12 @@ use crate::address::{Ipv4Addr, MacAddr};
 use crate::bgp::{select_bgp_route, BgpPolicy, BgpRoute, Prefix};
 use crate::host::Host;
 use crate::ospf::{Link, Topology};
-use crate::packet::IpPacket;
-use crate::routing::{ForwardOutcome, Interface, Router, RoutingTable};
+use crate::packet::{IpPacket, IpPayload};
+use crate::routing::{ForwardOutcome, Interface, Router, RouterAction, RoutingTable};
 use crate::switch::Switch;
 use crate::reliable::{GbnReceiver, GbnSender, LossyNetwork, SrReceiver, SrSender};
 use crate::tcp::{TcpConnection, TcpSegment};
+use crate::traceroute::{trace_route, TraceOutcome, TraceRouter};
 
 // ========== v0.1:L3 路由决策演示 ==========
 pub fn demo_v01() {
@@ -129,7 +130,7 @@ pub fn demo_v04() {
 
     // 场景一:TTL=2,经过路由器后变 1,成功转发
     println!("--- 场景一:TTL=2,转发成功 ---");
-    let mut pkt1 = IpPacket { src, dst, ttl: 2, payload: "hello".to_string() };
+    let mut pkt1 = IpPacket { src, dst, ttl: 2, payload: IpPayload::Data("hello".to_string()) };
     match router.forward(&mut pkt1) {
         ForwardOutcome::Forwarded { next_hop, .. } => println!("转发到下一跳 {},剩余 TTL={}", next_hop.to_dotted(), pkt1.ttl),
         ForwardOutcome::TtlExceeded => println!("TTL 耗尽,丢弃"),
@@ -139,7 +140,7 @@ pub fn demo_v04() {
 
     // 场景二:TTL=1,经过路由器后变 0,被丢弃
     println!("--- 场景二:TTL=1,耗尽丢弃 ---");
-    let mut pkt2 = IpPacket { src, dst, ttl: 1, payload: "hello".to_string() };
+    let mut pkt2 = IpPacket { src, dst, ttl: 1, payload: IpPayload::Data("hello".to_string()) };
     match router.forward(&mut pkt2) {
         ForwardOutcome::Forwarded { next_hop, .. } => println!("转发到下一跳 {}", next_hop.to_dotted()),
         ForwardOutcome::TtlExceeded => println!("TTL 耗尽,丢弃(防止环路)"),
@@ -149,7 +150,7 @@ pub fn demo_v04() {
 
     // 场景三:TTL=3,连续转发模拟多跳,直到耗尽
     println!("--- 场景三:TTL=3 连续转发,模拟多跳 ---");
-    let mut pkt3 = IpPacket { src, dst, ttl: 3, payload: "hello".to_string() };
+    let mut pkt3 = IpPacket { src, dst, ttl: 3, payload: IpPayload::Data("hello".to_string()) };
     for hop in 1..=4 {
         match router.forward(&mut pkt3) {
             ForwardOutcome::Forwarded { next_hop, .. } => println!("第 {} 跳:转发到 {},剩余 TTL={}", hop, next_hop.to_dotted(), pkt3.ttl),
@@ -195,7 +196,7 @@ pub fn demo_v05() {
     let src = Ipv4Addr { value: 0xC0A80A05 }; // 192.168.10.5
 
     println!("--- 场景一:跨网段转发(eth0 进 → eth1 出) ---");
-    let mut pkt1 = IpPacket { src, dst: Ipv4Addr { value: 0x0A000008 }, ttl: 64, payload: "hello across".to_string() };
+    let mut pkt1 = IpPacket { src, dst: Ipv4Addr { value: 0x0A000008 }, ttl: 64, payload: IpPayload::Data("hello across".to_string()) };
     let in_eth0 = router.interfaces[0].in_subnet(pkt1.dst);
     println!("目的 {} 在 eth0 子网内吗? {} → 需要路由转发", pkt1.dst.to_dotted(), in_eth0);
     match router.forward(&mut pkt1) {
@@ -212,7 +213,7 @@ pub fn demo_v05() {
     println!();
 
     println!("--- 场景二:同侧子网(eth0 进 → eth0 出) ---");
-    let mut pkt2 = IpPacket { src, dst: Ipv4Addr { value: 0xC0A80A63 }, ttl: 64, payload: "hello same subnet".to_string() };
+    let mut pkt2 = IpPacket { src, dst: Ipv4Addr { value: 0xC0A80A63 }, ttl: 64, payload: IpPayload::Data("hello same subnet".to_string()) };
     match router.forward(&mut pkt2) {
         ForwardOutcome::Forwarded { next_hop, iface, .. } => {
             let i = &router.interfaces[iface];
@@ -223,7 +224,7 @@ pub fn demo_v05() {
     println!();
 
     println!("--- 场景三:无路由(查不到,丢弃) ---");
-    let mut pkt3 = IpPacket { src, dst: Ipv4Addr { value: 0xAC100005 }, ttl: 64, payload: "hello nowhere".to_string() };
+    let mut pkt3 = IpPacket { src, dst: Ipv4Addr { value: 0xAC100005 }, ttl: 64, payload: IpPayload::Data("hello nowhere".to_string()) };
     match router.forward(&mut pkt3) {
         ForwardOutcome::NoRoute => println!("172.16.0.5 无匹配路由,丢弃"),
         _ => unreachable!(),
@@ -233,7 +234,7 @@ pub fn demo_v05() {
     println!("--- 场景四:补一条默认路由,走网关(间接转发) ---");
     let gateway = Ipv4Addr { value: 0x0A0000FE }; // 10.0.0.254
     router.routing_table.add_default_route(1, gateway);
-    let mut pkt4 = IpPacket { src, dst: Ipv4Addr { value: 0xAC100005 }, ttl: 64, payload: "hello via gateway".to_string() };
+    let mut pkt4 = IpPacket { src, dst: Ipv4Addr { value: 0xAC100005 }, ttl: 64, payload: IpPayload::Data("hello via gateway".to_string()) };
     match router.forward(&mut pkt4) {
         ForwardOutcome::Forwarded { next_hop, iface, .. } => {
             let i = &router.interfaces[iface];
@@ -244,7 +245,7 @@ pub fn demo_v05() {
     println!();
 
     println!("--- 场景五:TTL 递减,直到耗尽(防环) ---");
-    let mut pkt5 = IpPacket { src, dst: Ipv4Addr { value: 0x0A000008 }, ttl: 3, payload: "hello ttl".to_string() };
+    let mut pkt5 = IpPacket { src, dst: Ipv4Addr { value: 0x0A000008 }, ttl: 3, payload: IpPayload::Data("hello ttl".to_string()) };
     for hop in 1..=4 {
         match router.forward(&mut pkt5) {
             ForwardOutcome::Forwarded { next_hop, .. } => println!("第 {} 跳:转发到 {},剩余 TTL={}", hop, next_hop.to_dotted(), pkt5.ttl),
@@ -507,6 +508,259 @@ fn print_tcp_segment(label: &str, segment: &TcpSegment) {
         segment.window,
         data
     );
+}
+
+// ========== v0.6 第一个检查点：同一 LAN 内的 ICMP ping ==========
+pub fn demo_v06_ping_same_lan() {
+    println!("========== v0.6：ICMP ping（同一 LAN） ==========");
+
+    let netmask = Ipv4Addr { value: 0xFFFF_FF00 }; // /24
+    let make_host = |name: &str, ip: Ipv4Addr, mac: MacAddr| -> Rc<Host> {
+        let mut routes = RoutingTable::new();
+        routes.add_direct_route(0, ip, netmask);
+        Rc::new(Host::new(name, ip, netmask, routes, mac))
+    };
+
+    let alice_ip = Ipv4Addr { value: 0xC0A8_0102 }; // 192.168.1.2
+    let bob_ip = Ipv4Addr { value: 0xC0A8_0103 }; // 192.168.1.3
+    let alice = make_host("Alice", alice_ip, MacAddr::new([0x02, 0, 0, 0, 0, 2]));
+    let bob = make_host("Bob", bob_ip, MacAddr::new([0x02, 0, 0, 0, 0, 3]));
+    let mut switch = Switch::new();
+    switch.connect(0, alice.clone());
+    switch.connect(1, bob);
+
+    alice.ping(bob_ip, 1, &mut switch).unwrap();
+    println!("结论：Echo Request 和 Echo Reply 都经过 IP → ARP → Ethernet。\n");
+}
+
+// ========== v0.6 第二个检查点：跨 Router ping + ICMP 错误 ==========
+pub fn demo_v06_ping_across_router() {
+    println!("========== v0.6：跨 Router ping 与 ICMP 错误 ==========");
+
+    let mask = Ipv4Addr { value: 0xFFFF_FF00 };
+    let alice_ip = Ipv4Addr { value: 0xC0A8_0102 }; // 192.168.1.2
+    let left_gateway = Ipv4Addr { value: 0xC0A8_0101 }; // 192.168.1.1
+    let right_gateway = Ipv4Addr { value: 0x0A00_0001 }; // 10.0.0.1
+    let bob_ip = Ipv4Addr { value: 0x0A00_0002 }; // 10.0.0.2
+    let alice_mac = MacAddr::new([0x02, 0, 0, 0, 1, 2]);
+    let router_left_mac = MacAddr::new([0x02, 0, 0, 0, 1, 1]);
+    let router_right_mac = MacAddr::new([0x02, 0, 0, 0, 2, 1]);
+    let bob_mac = MacAddr::new([0x02, 0, 0, 0, 2, 2]);
+
+    let mut alice_routes = RoutingTable::new();
+    alice_routes.add_direct_route(0, alice_ip, mask);
+    alice_routes.add_default_route(0, left_gateway);
+    let alice = Host::new("Alice", alice_ip, mask, alice_routes, alice_mac);
+
+    let mut bob_routes = RoutingTable::new();
+    bob_routes.add_direct_route(0, bob_ip, mask);
+    bob_routes.add_default_route(0, right_gateway);
+    let bob = Host::new("Bob", bob_ip, mask, bob_routes, bob_mac);
+
+    let left = Interface::new("left", left_gateway, mask, router_left_mac);
+    let right = Interface::new("right", right_gateway, mask, router_right_mac);
+    let mut router_routes = RoutingTable::new();
+    router_routes.add_direct_route(0, left.ip, mask);
+    router_routes.add_direct_route(1, right.ip, mask);
+    let router = Router::new("R1", vec![left, right], router_routes);
+
+    println!("ARP 预填：Alice→R1-left，R1-right→Bob；反向映射也已知。");
+    println!("--- 场景一：Echo Request 跨 Router，Echo Reply 原路返回 ---");
+    let request = alice.create_ping_packet(bob_ip, 1);
+    let alice_next_hop = alice.next_hop(bob_ip).unwrap();
+    println!("Alice: dst={}，next-hop={}，Ethernet {} -> {}",
+        bob_ip.to_dotted(), alice_next_hop.to_dotted(), alice_mac.to_string(), router_left_mac.to_string());
+
+    let forwarded_request = match router.receive_ip(0, request) {
+        RouterAction::Forward { packet, next_hop, iface, src_mac } => {
+            println!("R1: TTL 64 -> {}，route dst={}，out={}，next-hop={}",
+                packet.ttl, packet.dst.to_dotted(), router.interfaces[iface].name, next_hop.to_dotted());
+            println!("R1: Ethernet {} -> {}", src_mac.to_string(), bob_mac.to_string());
+            packet
+        }
+        RouterAction::Reply { packet, next_hop, iface, src_mac } => panic!(
+            "正常 ping 不应产生 Reply: src={}, next-hop={}, iface={}, mac={}",
+            packet.src.to_dotted(), next_hop.to_dotted(), iface, src_mac.to_string()
+        ),
+        RouterAction::Drop { reason } => panic!("正常 ping 被丢弃: {:?}", reason),
+    };
+
+    let reply = bob.receive_ip(&forwarded_request).expect("Bob 应创建 Echo Reply");
+    println!("Bob: Echo Request 到达，创建 Echo Reply；next-hop={}",
+        bob.next_hop(alice_ip).unwrap().to_dotted());
+
+    let forwarded_reply = match router.receive_ip(1, reply) {
+        RouterAction::Forward { packet, next_hop, iface, src_mac } => {
+            println!("R1: Reply TTL 64 -> {}，out={}，next-hop={}",
+                packet.ttl, router.interfaces[iface].name, next_hop.to_dotted());
+            println!("R1: Ethernet {} -> {}", src_mac.to_string(), alice_mac.to_string());
+            packet
+        }
+        RouterAction::Reply { packet, next_hop, iface, src_mac } => panic!(
+            "Echo Reply 不应变成 Router Reply: src={}, next-hop={}, iface={}, mac={}",
+            packet.src.to_dotted(), next_hop.to_dotted(), iface, src_mac.to_string()
+        ),
+        RouterAction::Drop { reason } => panic!("Echo Reply 被丢弃: {:?}", reason),
+    };
+    alice.receive_ip(&forwarded_reply);
+    println!();
+
+    println!("--- 场景二：TTL=1，在 R1 耗尽 ---");
+    let mut ttl_probe = alice.create_ping_packet(bob_ip, 2);
+    ttl_probe.ttl = 1;
+    match router.receive_ip(0, ttl_probe) {
+        RouterAction::Reply { packet, next_hop, iface, src_mac } => {
+            println!("R1: TTL 耗尽，生成 ICMP Time Exceeded；out={}，next-hop={}，src-mac={}",
+                router.interfaces[iface].name, next_hop.to_dotted(), src_mac.to_string());
+            alice.receive_ip(&packet);
+        }
+        RouterAction::Forward { packet, next_hop, iface, src_mac } => panic!(
+            "TTL=1 不应转发: dst={}, next-hop={}, iface={}, mac={}",
+            packet.dst.to_dotted(), next_hop.to_dotted(), iface, src_mac.to_string()
+        ),
+        RouterAction::Drop { reason } => panic!("无法回送 Time Exceeded: {:?}", reason),
+    }
+    println!();
+
+    println!("--- 场景三：R1 没有到 172.16.0.2 的路由 ---");
+    let unreachable = Ipv4Addr { value: 0xAC10_0002 };
+    let request = alice.create_ping_packet(unreachable, 3);
+    match router.receive_ip(0, request) {
+        RouterAction::Reply { packet, next_hop, iface, src_mac } => {
+            println!("R1: 无目的路由，生成 ICMP Destination Unreachable；out={}，next-hop={}，src-mac={}",
+                router.interfaces[iface].name, next_hop.to_dotted(), src_mac.to_string());
+            alice.receive_ip(&packet);
+        }
+        RouterAction::Forward { packet, next_hop, iface, src_mac } => panic!(
+            "无路由不应转发: dst={}, next-hop={}, iface={}, mac={}",
+            packet.dst.to_dotted(), next_hop.to_dotted(), iface, src_mac.to_string()
+        ),
+        RouterAction::Drop { reason } => panic!("无法回送 Destination Unreachable: {:?}", reason),
+    }
+    println!();
+}
+
+// ========== v0.6：traceroute（逐步增加 TTL） ==========
+pub fn demo_v06_traceroute() {
+    println!("========== v0.6：traceroute ==========");
+    println!("拓扑：Alice -- R1 -- R2 -- R3 -- Bob");
+
+    let lan_mask = Ipv4Addr { value: 0xFFFF_FF00 }; // /24
+    let link_mask = Ipv4Addr { value: 0xFFFF_FFFC }; // /30 点到点链路
+    let alice_ip = Ipv4Addr { value: 0xC0A8_0102 }; // 192.168.1.2
+    let bob_ip = Ipv4Addr { value: 0xAC10_0002 }; // 172.16.0.2
+    let alice = Host::new(
+        "Alice",
+        alice_ip,
+        lan_mask,
+        RoutingTable::new(),
+        MacAddr::new([0x02, 0, 0, 0, 1, 2]),
+    );
+    let bob = Host::new(
+        "Bob",
+        bob_ip,
+        lan_mask,
+        RoutingTable::new(),
+        MacAddr::new([0x02, 0, 0, 0, 4, 2]),
+    );
+
+    // R1: 192.168.1.0/24 <-> 10.0.12.0/30
+    let r1_left = Interface::new(
+        "lan-a",
+        Ipv4Addr { value: 0xC0A8_0101 },
+        lan_mask,
+        MacAddr::new([0x02, 0, 0, 0, 1, 1]),
+    );
+    let r1_right = Interface::new(
+        "to-r2",
+        Ipv4Addr { value: 0x0A00_0C01 },
+        link_mask,
+        MacAddr::new([0x02, 0, 0, 0, 12, 1]),
+    );
+    let mut r1_routes = RoutingTable::new();
+    r1_routes.add_direct_route(0, r1_left.ip, lan_mask);
+    r1_routes.add_direct_route(1, r1_right.ip, link_mask);
+    r1_routes.add_route(
+        Ipv4Addr { value: 0xAC10_0000 },
+        24,
+        Ipv4Addr { value: 0x0A00_0C02 },
+        1,
+    );
+    let r1 = Router::new("R1", vec![r1_left, r1_right], r1_routes);
+
+    // R2: 10.0.12.0/30 <-> 10.0.23.0/30
+    let r2_left = Interface::new(
+        "to-r1",
+        Ipv4Addr { value: 0x0A00_0C02 },
+        link_mask,
+        MacAddr::new([0x02, 0, 0, 0, 12, 2]),
+    );
+    let r2_right = Interface::new(
+        "to-r3",
+        Ipv4Addr { value: 0x0A00_1701 },
+        link_mask,
+        MacAddr::new([0x02, 0, 0, 0, 23, 1]),
+    );
+    let mut r2_routes = RoutingTable::new();
+    r2_routes.add_direct_route(0, r2_left.ip, link_mask);
+    r2_routes.add_direct_route(1, r2_right.ip, link_mask);
+    r2_routes.add_route(
+        Ipv4Addr { value: 0xC0A8_0100 },
+        24,
+        Ipv4Addr { value: 0x0A00_0C01 },
+        0,
+    );
+    r2_routes.add_route(
+        Ipv4Addr { value: 0xAC10_0000 },
+        24,
+        Ipv4Addr { value: 0x0A00_1702 },
+        1,
+    );
+    let r2 = Router::new("R2", vec![r2_left, r2_right], r2_routes);
+
+    // R3: 10.0.23.0/30 <-> 172.16.0.0/24
+    let r3_left = Interface::new(
+        "to-r2",
+        Ipv4Addr { value: 0x0A00_1702 },
+        link_mask,
+        MacAddr::new([0x02, 0, 0, 0, 23, 2]),
+    );
+    let r3_right = Interface::new(
+        "lan-b",
+        Ipv4Addr { value: 0xAC10_0001 },
+        lan_mask,
+        MacAddr::new([0x02, 0, 0, 0, 4, 1]),
+    );
+    let mut r3_routes = RoutingTable::new();
+    r3_routes.add_direct_route(0, r3_left.ip, link_mask);
+    r3_routes.add_direct_route(1, r3_right.ip, lan_mask);
+    r3_routes.add_route(
+        Ipv4Addr { value: 0xC0A8_0100 },
+        24,
+        Ipv4Addr { value: 0x0A00_1701 },
+        0,
+    );
+    let r3 = Router::new("R3", vec![r3_left, r3_right], r3_routes);
+
+    let path = [
+        TraceRouter { router: &r1, incoming_iface: 0 },
+        TraceRouter { router: &r2, incoming_iface: 0 },
+        TraceRouter { router: &r3, incoming_iface: 0 },
+    ];
+    println!("traceroute to {}, max_hops=8", bob_ip.to_dotted());
+    for hop in trace_route(&alice, &bob, bob_ip, &path, 8) {
+        let responder = hop.responder
+            .map(|ip| ip.to_dotted())
+            .unwrap_or_else(|| "*".to_string());
+        match hop.outcome {
+            TraceOutcome::TimeExceeded => println!("{:>2}  {}  Time Exceeded", hop.ttl, responder),
+            TraceOutcome::ReachedDestination => println!("{:>2}  {}  Echo Reply（到达目标）", hop.ttl, responder),
+            TraceOutcome::DestinationUnreachable => println!("{:>2}  {}  Destination Unreachable", hop.ttl, responder),
+            TraceOutcome::Dropped(reason) => println!("{:>2}  *  Drop: {:?}", hop.ttl, reason),
+            TraceOutcome::Timeout => println!("{:>2}  *  Timeout", hop.ttl),
+        }
+    }
+    println!("结论：traceroute 不需要新协议；它只是重复发送不同 TTL 的探测包，并读取 ICMP 响应。\n");
 }
 
 // ========== 简化版 OSPF:动态路由(SPF 最短路径优先) ==========

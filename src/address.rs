@@ -1,5 +1,5 @@
 // ========== 二层:MAC 地址 ==========
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MacAddr([u8; 6]);
 
 impl MacAddr {
@@ -16,7 +16,7 @@ impl MacAddr {
 }
 
 // ========== 三层:IPv4 地址 ==========
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Ipv4Addr {
     pub value: u32,
 }

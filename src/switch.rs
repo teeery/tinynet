@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::address::MacAddr;
-use crate::host::Host;
+use crate::host::{Host, HostAction};
 use crate::packet::EthernetFrame;
 
 // ========== 交换机 ==========
@@ -13,7 +13,10 @@ pub struct Switch {
 
 impl Switch {
     pub fn new() -> Self {
-        Switch { ports: HashMap::new(), mac_table: HashMap::new() }
+        Switch {
+            ports: HashMap::new(),
+            mac_table: HashMap::new(),
+        }
     }
 
     pub fn connect(&mut self, port: usize, host: Rc<Host>) {
@@ -22,7 +25,10 @@ impl Switch {
 
     // 找到帧的来源端口(现实中硬件直接知道入端口;这里通过 MAC 反查模拟)
     fn source_port(&self, mac: MacAddr) -> Option<usize> {
-        self.ports.iter().find(|(_, h)| h.mac == mac).map(|(p, _)| *p)
+        self.ports
+            .iter()
+            .find(|(_, h)| h.mac == mac)
+            .map(|(p, _)| *p)
     }
 
     // 转发一帧:MAC Learning + 查表 + 单播/广播
@@ -39,7 +45,11 @@ impl Switch {
         // 2. 查表确定目标端口
         let targets: Vec<usize> = match self.mac_table.get(&frame.dst) {
             Some(&port) => {
-                println!("[交换机] 查表命中 {} -> 端口{}", frame.dst.to_string(), port);
+                println!(
+                    "[交换机] 查表命中 {} -> 端口{}",
+                    frame.dst.to_string(),
+                    port
+                );
                 vec![port]
             }
             None => {
@@ -56,8 +66,17 @@ impl Switch {
         for port in targets {
             let host = self.ports.get(&port).cloned();
             if let Some(host) = host {
-                if let Some(reply) = host.receive(&frame) {
-                    self.forward(reply); // 收到回应(ARP 响应),继续转发
+                if let Some(action) = host.receive(&frame) {
+                    match action {
+                        // ARP Reply 已经是完整的二层帧，可以直接转发。
+                        HostAction::SendEthernet(reply) => self.forward(reply),
+                        // ICMP Reply 是新的 IP 包，必须重新查路由、ARP 和封装 Ethernet。
+                        HostAction::SendIp(reply) => {
+                            if let Err(error) = host.send_ip(reply, self) {
+                                println!("[交换机] {} 回复失败: {}", host.mac.to_string(), error);
+                            }
+                        }
+                    }
                 }
             }
         }
