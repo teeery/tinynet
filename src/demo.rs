@@ -8,6 +8,7 @@ use crate::packet::IpPacket;
 use crate::routing::{ForwardOutcome, Interface, Router, RoutingTable};
 use crate::switch::Switch;
 use crate::reliable::{GbnReceiver, GbnSender, LossyNetwork, SrReceiver, SrSender};
+use crate::tcp::{TcpConnection, TcpSegment};
 
 // ========== v0.1:L3 路由决策演示 ==========
 pub fn demo_v01() {
@@ -370,6 +371,142 @@ fn wait_for_sr_timeout(sender: &mut SrSender) -> Vec<crate::reliable::Segment> {
 
 fn seq_list(segments: &[crate::reliable::Segment]) -> String {
     segments.iter().map(|segment| segment.seq.to_string()).collect::<Vec<_>>().join(" ")
+}
+
+// ========== v0.5：TCP（三次握手 + 滑动窗口 + 流量控制 + 四次挥手） ==========
+/*
+Client 与 Server 三次握手。
+Client 想发送 12 字节，但受服务端 rwnd=8 限制，只能先发送 8 字节。
+服务端缓冲区满，通告零窗口，客户端暂停。
+服务端应用读取 4 字节，窗口重新打开。
+客户端发送剩余 4 字节。
+双方执行完整四次挥手。
+Client 等待 2MSL 后关闭。
+*/
+pub fn demo_v05_tcp() {
+    println!("========== v0.5：TCP ==========");
+    println!("场景：Client:50000 连接 Server:80，发送 12 字节数据后主动关闭。\n");
+
+    // 客户端发送窗口为 12 字节；服务端接收缓冲区只有 8 字节。
+    // 因此即使客户端愿意发送 12 字节，也必须服从服务端通告的 rwnd=8。
+    let mut client = TcpConnection::client("Client", 50_000, 80, 1000, 12, 16);
+    let mut server = TcpConnection::listener("Server", 80, 5000, 12, 8);
+
+    println!("--- 一、三次握手 ---");
+    let syn = client.connect().unwrap();
+    print_tcp_segment("1. Client -> Server", &syn);
+    println!("   Client: CLOSED -> {:?}", client.state);
+
+    let syn_ack = server.receive(syn).unwrap().unwrap();
+    print_tcp_segment("2. Server -> Client", &syn_ack);
+    println!("   Server: LISTEN -> {:?}", server.state);
+
+    let ack = client.receive(syn_ack).unwrap().unwrap();
+    print_tcp_segment("3. Client -> Server", &ack);
+    server.receive(ack).unwrap();
+    println!(
+        "   Client={:?}, Server={:?}：连接建立\n",
+        client.state, server.state
+    );
+
+    println!("--- 二、滑动窗口与流量控制 ---");
+    let data = b"ABCDEFGHIJKL"; // 12 字节，MSS=4，理论上分成 3 段。
+    println!(
+        "Client 想发送 12 字节；send_window=12，Server 通告 rwnd={}",
+        client.peer_window
+    );
+    let first_batch = client.send_data(data, 4).unwrap();
+    let first_sent: usize = first_batch
+        .iter()
+        .map(|segment| segment.payload.len())
+        .sum();
+    println!(
+        "有效窗口 min(12, {})=8，所以第一轮只能发送 {} 字节：",
+        client.peer_window, first_sent
+    );
+
+    for segment in first_batch {
+        print_tcp_segment("   Client -> Server", &segment);
+        let ack = server.receive(segment).unwrap().unwrap();
+        print_tcp_segment("   Server -> Client", &ack);
+        client.receive(ack).unwrap();
+        println!(
+            "   窗口滑动：send_base={}，next_seq={}，peer_rwnd={}",
+            client.send_base, client.next_seq, client.peer_window
+        );
+    }
+
+    let blocked = client.send_data(&data[first_sent..], 4).unwrap();
+    println!(
+        "Server 缓冲区已满：rwnd={}；剩余 4 字节发送结果={} 段（发送暂停）",
+        server.rwnd,
+        blocked.len()
+    );
+
+    let consumed = server.application_read(4);
+    println!(
+        "Server 应用读取 {:?}，空出 4 字节，rwnd={}",
+        String::from_utf8_lossy(&consumed),
+        server.rwnd
+    );
+    let window_update = server.window_update().unwrap();
+    print_tcp_segment("   Server -> Client（窗口更新）", &window_update);
+    client.receive(window_update).unwrap();
+
+    let second_batch = client.send_data(&data[first_sent..], 4).unwrap();
+    for segment in second_batch {
+        print_tcp_segment("   Client -> Server", &segment);
+        let ack = server.receive(segment).unwrap().unwrap();
+        print_tcp_segment("   Server -> Client", &ack);
+        client.receive(ack).unwrap();
+    }
+    println!(
+        "12 字节全部确认：send_base={}，next_seq={}，未确认段={}\n",
+        client.send_base,
+        client.next_seq,
+        client.unacked.len()
+    );
+
+    println!("--- 三、四次挥手 ---");
+    let client_fin = client.close().unwrap();
+    print_tcp_segment("1. Client -> Server", &client_fin);
+    println!("   Client -> {:?}", client.state);
+
+    let server_ack = server.receive(client_fin).unwrap().unwrap();
+    print_tcp_segment("2. Server -> Client", &server_ack);
+    println!("   Server -> {:?}（等待服务端应用 close）", server.state);
+    client.receive(server_ack).unwrap();
+    println!("   Client -> {:?}", client.state);
+
+    let server_fin = server.close().unwrap();
+    print_tcp_segment("3. Server -> Client", &server_fin);
+    println!("   Server -> {:?}", server.state);
+
+    let final_ack = client.receive(server_fin).unwrap().unwrap();
+    print_tcp_segment("4. Client -> Server", &final_ack);
+    server.receive(final_ack).unwrap();
+    println!("   Client={:?}, Server={:?}", client.state, server.state);
+
+    client.expire_time_wait().unwrap();
+    println!("   2MSL 到期：Client -> {:?}\n", client.state);
+    println!("结论：TCP 用握手建立双方序号空间，用滑动窗口连续发送，用 rwnd 防止淹没接收方，最后用四次挥手独立关闭两个方向。\n");
+}
+
+fn print_tcp_segment(label: &str, segment: &TcpSegment) {
+    let data = if segment.payload.is_empty() {
+        String::new()
+    } else {
+        format!(", data={:?}", String::from_utf8_lossy(&segment.payload))
+    };
+    println!(
+        "{}: [{}] seq={}, ack={}, win={}{}",
+        label,
+        segment.flags(),
+        segment.seq,
+        segment.ack,
+        segment.window,
+        data
+    );
 }
 
 // ========== 简化版 OSPF:动态路由(SPF 最短路径优先) ==========
