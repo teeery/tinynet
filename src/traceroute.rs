@@ -60,7 +60,9 @@ pub fn trace_route(
                             }
                             _ => TraceOutcome::Timeout,
                         },
-                        IpPayload::Data(_) => TraceOutcome::Timeout,
+                        IpPayload::Data(_) | IpPayload::Udp(_) | IpPayload::Tcp(_) => {
+                            TraceOutcome::Timeout
+                        }
                     };
                     result.push(TraceHop {
                         ttl,

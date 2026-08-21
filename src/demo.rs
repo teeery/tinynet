@@ -10,6 +10,9 @@ use crate::switch::Switch;
 use crate::reliable::{GbnReceiver, GbnSender, LossyNetwork, SrReceiver, SrSender};
 use crate::tcp::{TcpConnection, TcpSegment};
 use crate::traceroute::{trace_route, TraceOutcome, TraceRouter};
+use crate::dns::{DnsExchange, DnsRecord, DnsRecordData, DnsResolver, DnsServer};
+use crate::http::{HttpServer, HttpSession};
+use crate::udp::UdpPayload;
 
 // ========== v0.1:L3 路由决策演示 ==========
 pub fn demo_v01() {
@@ -797,9 +800,113 @@ pub fn demo_v06() {
     println!("说明:R4 的开销从 4 变 5,R1 自动绕道 R2-R3-R4,无需人工改配置。");
 }
 
-// ========== v0.7:简化版 BGP(路径向量 + 策略选路) ==========
-pub fn demo_v07() {
-    println!("========== v0.7:简化版 BGP(路径向量 + 策略选路) ==========");
+// ========== v0.7：408 应用层综合实验 ==========
+pub fn demo_v07_application() {
+    println!("========== v0.7：Application Layer（DNS + Mini HTTP） ==========");
+    let client_ip = Ipv4Addr { value: 0xC0A8_0102 }; // 192.168.1.2
+    let web_server_ip = Ipv4Addr { value: 0x0A00_0008 }; // 10.0.0.8
+
+    println!("\n--- Part 1：DNS 层次查询、UDP 封装与缓存 ---");
+    let root = DnsServer::new(
+        "Root DNS",
+        Ipv4Addr { value: 0xC000_0201 },
+        vec![
+            DnsRecord::ns("com", "a.gtld.test", 300),
+            DnsRecord::a("a.gtld.test", Ipv4Addr { value: 0xC000_0202 }, 300),
+        ],
+    );
+    let tld = DnsServer::new(
+        ".com TLD DNS",
+        Ipv4Addr { value: 0xC000_0202 },
+        vec![
+            DnsRecord::ns("tinynet.com", "ns.tinynet.com", 300),
+            DnsRecord::a("ns.tinynet.com", Ipv4Addr { value: 0xC000_0203 }, 300),
+        ],
+    );
+    let authoritative = DnsServer::new(
+        "tinynet.com Authoritative DNS",
+        Ipv4Addr { value: 0xC000_0203 },
+        vec![DnsRecord::a("www.tinynet.com", web_server_ip, 300)],
+    );
+    let servers = [&root, &tld, &authoritative];
+    let mut resolver = DnsResolver::new(client_ip, 53_000);
+
+    println!("[Resolver] www.tinynet.com A?\n[Cache] MISS");
+    let first = resolver.resolve("www.tinynet.com", &servers).unwrap();
+    for exchange in &first.exchanges {
+        print_dns_exchange(exchange);
+    }
+    println!("[Cache] store www.tinynet.com -> {} TTL={}", first.ip.to_dotted(), first.ttl);
+
+    resolver.tick(); // 模拟 1 秒过去，DNS TTL 300 → 299。
+    let cached_after_tick = resolver.cached("www.tinynet.com").unwrap();
+    println!("[Time] tick：DNS cache TTL {} -> {}", first.ttl, cached_after_tick.ttl);
+    let second = resolver.resolve("www.tinynet.com", &servers).unwrap();
+    println!("\n[Resolver] 再次查询 www.tinynet.com");
+    println!("[Cache] {} -> {} TTL={}（没有发送 UDP 包）",
+        if second.cache_hit { "HIT" } else { "MISS" }, second.ip.to_dotted(), second.ttl);
+
+    println!("\n--- Part 2：HTTP over TCP ---");
+    println!("DNS 结果：www.tinynet.com -> {}", second.ip.to_dotted());
+    let mut http_server = HttpServer::new("www.tinynet.com");
+    http_server.add_resource("/index.html", "<h1>TinyNet</h1>");
+    http_server.add_resource("/hello.txt", "hello network");
+    let mut session = HttpSession::new(http_server, 50_000);
+    let handshake = session.connect().unwrap();
+    for (index, segment) in handshake.iter().enumerate() {
+        println!("TCP {}: [{}] seq={} ack={}", index + 1, segment.flags(), segment.seq, segment.ack);
+    }
+    println!("TCP: Client={:?}, Server={:?}", session.tcp_client.state, session.tcp_server.state);
+
+    for path in ["/index.html", "/not-found", "/hello.txt"] {
+        let exchange = session.get(path).unwrap();
+        println!("\n[HTTP Request #{} / same TCP connection]", session.request_count);
+        print!("{}", String::from_utf8_lossy(&exchange.request.to_bytes()));
+        println!("[TCP] request bytes in {} segment(s)", exchange.request_segments.len());
+        println!("[HTTP Response]");
+        print!("{}", String::from_utf8_lossy(&exchange.response.to_bytes()));
+        println!("\n[TCP] response bytes in {} segment(s)", exchange.response_segments.len());
+    }
+
+    println!("\n--- Part 3：HTTP/1.1 持久连接结论 ---");
+    println!("TCP handshakes = {}", session.handshake_count);
+    println!("HTTP requests = {}", session.request_count);
+    println!("三个 GET 共用同一个 ESTABLISHED 连接，没有重新三次握手。");
+    session.close().unwrap();
+    println!("TCP close: Client={:?}, Server={:?}", session.tcp_client.state, session.tcp_server.state);
+    println!("\n结论：URL → DNS/UDP/IP → Server IP → TCP → HTTP 字节流，v0.7 完成。\n");
+}
+
+fn print_dns_exchange(exchange: &DnsExchange) {
+    let IpPayload::Udp(query_udp) = &exchange.query.payload else { unreachable!() };
+    let UdpPayload::Dns(query) = &query_udp.payload;
+    let question = &query.questions[0];
+    println!("\n-> {} ({})", exchange.server_name, exchange.query.dst.to_dotted());
+    println!("   [DNS] Query ID={} {} {:?}?", query.id, question.name, question.record_type);
+    println!("   [UDP] {} -> {}", query_udp.src_port, query_udp.dst_port);
+    println!("   [IP] {} -> {}", exchange.query.src.to_dotted(), exchange.query.dst.to_dotted());
+
+    let IpPayload::Udp(response_udp) = &exchange.response.payload else { unreachable!() };
+    let UdpPayload::Dns(response) = &response_udp.payload;
+    if let Some(answer) = response.answers.first() {
+        if let DnsRecordData::A(ip) = answer.data {
+            println!("<- [DNS] Answer {} A {} TTL={}", answer.name, ip.to_dotted(), answer.ttl);
+        }
+    } else if let Some(authority) = response.authorities.first() {
+        if let DnsRecordData::Ns(name_server) = &authority.data {
+            let glue = response.additionals.iter().find_map(|record| match record.data {
+                DnsRecordData::A(ip) => Some(ip.to_dotted()),
+                _ => None,
+            }).unwrap_or_else(|| "no glue".to_string());
+            println!("<- [DNS] Referral: {} NS {} ({})", authority.name, name_server, glue);
+        }
+    }
+    println!("   [UDP] {} -> {}", response_udp.src_port, response_udp.dst_port);
+}
+
+// ========== 扩展实验：简化版 BGP(路径向量 + 策略选路) ==========
+pub fn demo_bgp() {
+    println!("========== 扩展实验：简化版 BGP(路径向量 + 策略选路) ==========");
     println!();
 
     // 目的前缀:20.0.0.0/8,由 AS3 始发

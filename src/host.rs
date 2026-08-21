@@ -214,6 +214,14 @@ impl Host {
                         IpPayload::Icmp(_) => {
                             return self.receive_ip(pkt).map(HostAction::SendIp);
                         }
+                        IpPayload::Udp(datagram) => println!(
+                            "[{}] 收到 UDP 数据报: {} -> {} (TTL={})",
+                            self.name, datagram.src_port, datagram.dst_port, pkt.ttl
+                        ),
+                        IpPayload::Tcp(segment) => println!(
+                            "[{}] 收到 TCP 报文段: {} -> {}, seq={} (TTL={})",
+                            self.name, segment.src_port, segment.dst_port, segment.seq, pkt.ttl
+                        ),
                     }
                 }
                 None
@@ -229,7 +237,7 @@ impl Host {
         }
         match &packet.payload {
             IpPayload::Icmp(icmp) => self.handle_icmp(packet.src, icmp),
-            IpPayload::Data(_) => None,
+            IpPayload::Data(_) | IpPayload::Udp(_) | IpPayload::Tcp(_) => None,
         }
     }
 

@@ -1,5 +1,7 @@
 use crate::address::{Ipv4Addr, MacAddr};
 use crate::icmp::IcmpPacket;
+use crate::tcp::TcpSegment;
+use crate::udp::UdpDatagram;
 
 // ========== ARP 报文 ==========
 pub struct ArpPacket {
@@ -17,6 +19,8 @@ pub enum IpPayload {
     // 完成 v0.6 后，上层协议会逐步替代这个兼容分支。
     Data(String),
     Icmp(IcmpPacket),
+    Udp(UdpDatagram),
+    Tcp(TcpSegment),
 }
 
 // ========== 三层:IP 包 ==========

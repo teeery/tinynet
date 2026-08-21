@@ -10,6 +10,9 @@ mod reliable;
 mod tcp;
 pub mod icmp;
 mod traceroute;
+mod dns;
+mod udp;
+mod http;
 
 fn main() {
     demo::demo_v01();
@@ -23,5 +26,6 @@ fn main() {
     demo::demo_v06_ping_across_router();
     demo::demo_v06_traceroute();
     demo::demo_v06();
-    demo::demo_v07();
+    demo::demo_v07_application();
+    demo::demo_bgp();
 }
