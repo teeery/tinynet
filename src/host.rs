@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::address::{network_address, same_subnet, Ipv4Addr, MacAddr};
+use crate::address::{Ipv4Addr, MacAddr, network_address, same_subnet};
 use crate::icmp::{IcmpMessage, IcmpPacket};
 use crate::packet::{ArpPacket, EthernetFrame, EthernetPayload, IpPacket, IpPayload};
 use crate::routing::RoutingTable;
@@ -63,6 +63,14 @@ impl Host {
             mac,
             arp_cache: RefCell::new(HashMap::new()),
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn ip(&self) -> Ipv4Addr {
+        self.ip
     }
 
     // 旧的文本发送 API 现在只负责构造应用数据，所有网络层工作统一交给 send_ip。

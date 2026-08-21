@@ -48,7 +48,8 @@ impl TcpSegment {
         flags.join("+")
     }
 
-    fn sequence_len(&self) -> u32 {
+    // 运行时用它判断报文是否需要 RTO：纯 ACK 不占序号，也无需重传计时器。
+    pub fn sequence_len(&self) -> u32 {
         self.payload.len() as u32 + u32::from(self.syn) + u32::from(self.fin)
     }
 }

@@ -4,6 +4,7 @@ use crate::tcp::TcpSegment;
 use crate::udp::UdpDatagram;
 
 // ========== ARP 报文 ==========
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArpPacket {
     pub request: bool, // true=请求, false=响应
     pub sender_ip: Ipv4Addr,
@@ -33,11 +34,13 @@ pub struct IpPacket {
 }
 
 // ========== 以太网帧 ==========
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EthernetPayload {
     Arp(ArpPacket),
     Ip(IpPacket),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EthernetFrame {
     pub src: MacAddr,
     pub dst: MacAddr,
